@@ -2,6 +2,20 @@
 
 All notable changes to EverClaw are documented here.
 
+## [2026.3.10] - 2026-03-08
+
+### Changed
+- **Morpheus Proxy Router reference updated to v5.14.0** (was v5.12.0)
+  - Fix: Approve overflow during session creation (#623)
+  - Fix: NaN provider scores blocking session creation (#631)
+  - Fix: BadgerDB boot corruption (#632)
+  - Fix: Badger file cleanup on restart (#635)
+  - Feat: End-to-end request_id tracing for debugging (#625)
+  - Feat: Random request ID generation + improved logging (#628)
+  - Upstream: https://github.com/MorpheusAIs/Morpheus-Lumerin-Node/releases/tag/v5.14.0
+
+---
+
 ## [2026.3.9] - 2026-03-08
 
 ### Changed
