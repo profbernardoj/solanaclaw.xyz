@@ -11,9 +11,12 @@
  * - Maps model names to blockchain model IDs
  * - Health endpoint at GET /health
  * - Models endpoint at GET /v1/models (for OpenClaw discovery)
+ * - MOR balance monitoring with threshold alerts
+ * - Hybrid fallback: P2P → Gateway API when sessions fail
  */
 
 import http from "node:http";
+import https from "node:https";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -25,6 +28,16 @@ const COOKIE_PATH = process.env.MORPHEUS_COOKIE_PATH || path.join(process.env.HO
 const SESSION_DURATION = parseInt(process.env.MORPHEUS_SESSION_DURATION || "604800", 10); // 7 days default
 const RENEW_BEFORE_SEC = parseInt(process.env.MORPHEUS_RENEW_BEFORE || "3600", 10); // renew 1 hour before expiry
 const PROXY_API_KEY = process.env.MORPHEUS_PROXY_API_KEY || "morpheus-local"; // bearer token OpenClaw sends
+
+// --- P0: Balance Monitoring & Fallback ---
+const RPC_URL = process.env.EVERCLAW_RPC || "https://base-mainnet.public.blastapi.io";
+const MOR_TOKEN = "0x7431aDa8a591C955a994a21710752EF9b882b8e3";
+const MOR_BALANCE_THRESHOLD = parseFloat(process.env.MORPHEUS_MOR_THRESHOLD || "500"); // Alert below this
+const WALLET_ADDRESS = process.env.MORPHEUS_WALLET_ADDRESS || ""; // Router's wallet address for balance check
+const GATEWAY_API_KEY = process.env.MORPHEUS_GATEWAY_API_KEY || ""; // Gateway fallback API key
+const GATEWAY_BASE_URL = process.env.MORPHEUS_GATEWAY_URL || "https://api.mor.org/v1";
+const FALLBACK_THRESHOLD = parseInt(process.env.MORPHEUS_FALLBACK_THRESHOLD || "3", 10); // Failures before fallback
+const FALLBACK_RETRY_MS = parseInt(process.env.MORPHEUS_FALLBACK_RETRY_MS || "21600000", 10); // 6 hours
 
 // --- Model ID map (blockchain model IDs) ---
 // Hardcoded defaults used as fallback if the router is unreachable at startup.
@@ -75,7 +88,12 @@ async function refreshModelMap() {
 }
 
 // --- State ---
-const sessions = new Map(); // modelId -> { sessionId, expiresAt }
+const sessions = new Map(); // modelId -> { sessionId, expiresAt, stakeMor? }
+let morBalance = null; // Cached MOR balance
+let morBalanceLastCheck = 0;
+let consecutiveFailures = 0; // Track P2P failures for fallback
+let fallbackMode = false; // True when using Gateway instead of P2P
+let fallbackUntil = 0; // Timestamp when to retry P2P
 
 // --- Helpers ---
 
@@ -112,13 +130,208 @@ function routerFetch(method, urlPath, body = null, extraHeaders = {}) {
   });
 }
 
+// --- P0: Balance Monitoring ---
+
+/**
+ * Get wallet address (from env or router)
+ */
+async function getWalletAddress() {
+  // Use configured address if available
+  if (WALLET_ADDRESS) return WALLET_ADDRESS;
+
+  // Try to get from router API
+  try {
+    const res = await routerFetch("GET", "/blockchain/wallet");
+    if (res.status === 200) {
+      const data = JSON.parse(res.body.toString());
+      return data.address || data.Address;
+    }
+  } catch (e) {
+    // Router doesn't expose wallet endpoint
+  }
+  return null;
+}
+
+/**
+ * Fetch MOR balance from Base mainnet
+ */
+async function fetchMorBalance(address) {
+  // ERC20 balanceOf(address)
+  const balanceOfSig = "0x70a08231" + address.slice(2).padStart(64, "0");
+  return new Promise((resolve, reject) => {
+    const url = new URL("/", RPC_URL);
+    const body = JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "eth_call",
+      params: [{ to: MOR_TOKEN, data: balanceOfSig }, "latest"],
+    });
+
+    const client = RPC_URL.startsWith("https") ? https : http;
+    const req = client.request(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    }, (res) => {
+      const chunks = [];
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () => {
+        try {
+          const data = JSON.parse(Buffer.concat(chunks).toString());
+          if (data.result) {
+            const balanceWei = BigInt(data.result);
+            const balanceMor = Number(balanceWei) / 1e18;
+            resolve(balanceMor);
+          } else {
+            reject(new Error(data.error?.message || "No balance result"));
+          }
+        } catch (e) {
+          reject(e);
+        }
+      });
+    });
+    req.on("error", reject);
+    req.write(body);
+    req.end();
+  });
+}
+
+/**
+ * Check and cache MOR balance, return cached if fresh
+ */
+async function checkMorBalance() {
+  const CACHE_MS = 60000; // 1 minute cache
+  if (morBalance && Date.now() - morBalanceLastCheck < CACHE_MS) {
+    return morBalance;
+  }
+
+  try {
+    const address = await getWalletAddress();
+    if (!address) {
+      console.warn("[morpheus-proxy] Could not get wallet address for balance check");
+      return morBalance; // Return cached or null
+    }
+    morBalance = await fetchMorBalance(address);
+    morBalanceLastCheck = Date.now();
+
+    if (morBalance < MOR_BALANCE_THRESHOLD) {
+      console.warn(`[morpheus-proxy] ⚠️  MOR balance low: ${morBalance.toFixed(2)} MOR (threshold: ${MOR_BALANCE_THRESHOLD})`);
+    }
+
+    return morBalance;
+  } catch (e) {
+    console.warn(`[morpheus-proxy] Balance check failed: ${e.message}`);
+    return morBalance; // Return cached or null
+  }
+}
+
+/**
+ * Check if we should use Gateway fallback instead of P2P
+ */
+function shouldUseFallback() {
+  // No gateway key configured = no fallback
+  if (!GATEWAY_API_KEY) return false;
+
+  // Already in fallback mode
+  if (fallbackMode && Date.now() < fallbackUntil) return true;
+
+  // Exceeded failure threshold
+  if (consecutiveFailures >= FALLBACK_THRESHOLD) {
+    fallbackMode = true;
+    fallbackUntil = Date.now() + FALLBACK_RETRY_MS;
+    console.warn(`[morpheus-proxy] 🔄 Switching to Gateway fallback for ${FALLBACK_RETRY_MS / 3600000}h (${consecutiveFailures} consecutive failures)`);
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Reset fallback mode after successful P2P request
+ */
+function p2pSuccess() {
+  if (consecutiveFailures > 0) {
+    console.log(`[morpheus-proxy] ✅ P2P recovered, exiting fallback mode`);
+  }
+  consecutiveFailures = 0;
+  fallbackMode = false;
+}
+
+/**
+ * Record P2P failure for fallback tracking
+ */
+function p2pFailure() {
+  consecutiveFailures++;
+  console.warn(`[morpheus-proxy] ❌ P2P failure #${consecutiveFailures} (threshold: ${FALLBACK_THRESHOLD})`);
+}
+
+/**
+ * Forward request to Morpheus Gateway API (fallback)
+ */
+async function forwardToGateway(body, isStreaming, res) {
+  if (!GATEWAY_API_KEY) {
+    throw new Error("Gateway API key not configured");
+  }
+
+  const url = new URL("/chat/completions", GATEWAY_BASE_URL);
+  const headers = {
+    "Authorization": `Bearer ${GATEWAY_API_KEY}`,
+    "Content-Type": "application/json",
+  };
+
+  return new Promise((resolve, reject) => {
+    const req = https.request(url, { method: "POST", headers }, (upstreamRes) => {
+      if (isStreaming && upstreamRes.headers["content-type"]?.includes("text/event-stream")) {
+        const outHeaders = {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          "Connection": "keep-alive",
+        };
+        res.writeHead(upstreamRes.statusCode, outHeaders);
+        upstreamRes.on("data", (chunk) => res.write(chunk));
+        upstreamRes.on("end", () => res.end());
+        upstreamRes.on("error", (e) => {
+          console.error(`[morpheus-proxy] Gateway stream error: ${e.message}`);
+          res.end();
+        });
+        resolve({ streamed: true });
+      } else {
+        const chunks = [];
+        upstreamRes.on("data", (c) => chunks.push(c));
+        upstreamRes.on("end", () => {
+          resolve({
+            status: upstreamRes.statusCode,
+            headers: upstreamRes.headers,
+            body: Buffer.concat(chunks),
+          });
+        });
+        upstreamRes.on("error", reject);
+      }
+    });
+    req.on("error", reject);
+    req.write(body);
+    req.end();
+  });
+}
+
 async function openSession(modelId) {
-  console.log(`[morpheus-proxy] Opening session for model ${modelId} (duration: ${SESSION_DURATION}s)`);
+  // P0: Check MOR balance before opening session
+  const balance = await checkMorBalance();
+  if (balance !== null && balance < MOR_BALANCE_THRESHOLD * 0.1) {
+    // Less than 10% of threshold = critical, refuse session
+    throw new Error(`MOR balance critically low (${balance.toFixed(2)} MOR), cannot open session`);
+  }
+
+  console.log(`[morpheus-proxy] Opening session for model ${modelId} (duration: ${SESSION_DURATION}s, balance: ${balance?.toFixed(2) || "unknown"} MOR)`);
   const res = await routerFetch("POST", `/blockchain/models/${modelId}/session`, {
     sessionDuration: SESSION_DURATION,
   });
   if (res.status !== 200) {
     const text = res.body.toString();
+    // Check for balance-related errors
+    if (text.includes("transfer amount exceeds balance") || text.includes("insufficient")) {
+      p2pFailure();
+      throw new Error(`Insufficient MOR balance for session: ${text.substring(0, 200)}`);
+    }
     throw new Error(`Failed to open session (${res.status}): ${text}`);
   }
   const data = JSON.parse(res.body.toString());
@@ -130,6 +343,11 @@ async function openSession(modelId) {
 }
 
 async function getOrCreateSession(modelId) {
+  // P0: Check if we should use Gateway fallback
+  if (shouldUseFallback()) {
+    return null; // Signal to use Gateway instead
+  }
+
   const existing = sessions.get(modelId);
   if (existing && Date.now() < existing.expiresAt) {
     return existing.sessionId;
@@ -237,17 +455,78 @@ async function handleChatCompletions(req, res, body) {
       "invalid_request_error", "model_not_found");
   }
 
+  const isStreaming = parsed.stream === true;
+
+  // P0: Check if we should use Gateway fallback
+  if (shouldUseFallback() && GATEWAY_API_KEY) {
+    console.log(`[morpheus-proxy] 🔄 Using Gateway fallback for ${requestedModel}`);
+    try {
+      const result = await forwardToGateway(body, isStreaming, res);
+      if (result.streamed) return; // Already handled streaming
+
+      if (result.status >= 200 && result.status < 300) {
+        res.writeHead(result.status, { "Content-Type": result.headers["content-type"] || "application/json" });
+        res.end(result.body);
+        return;
+      }
+
+      return oaiError(res, result.status >= 500 ? 502 : result.status,
+        `Gateway error: ${result.body.toString().substring(0, 500)}`,
+        "server_error", "gateway_error");
+    } catch (e) {
+      console.error(`[morpheus-proxy] Gateway fallback failed: ${e.message}`);
+      return oaiError(res, 502, `Gateway fallback error: ${e.message}`, "server_error", "gateway_error");
+    }
+  }
+
   // --- Attempt 1: use existing/new session ---
   let sessionId;
   try {
     sessionId = await getOrCreateSession(modelId);
+    if (!sessionId) {
+      // Fallback mode - should not reach here, but handle gracefully
+      if (GATEWAY_API_KEY) {
+        console.log(`[morpheus-proxy] No P2P session, using Gateway fallback`);
+        const result = await forwardToGateway(body, isStreaming, res);
+        if (result.streamed) return;
+        if (result.status >= 200 && result.status < 300) {
+          res.writeHead(result.status, { "Content-Type": result.headers["content-type"] || "application/json" });
+          res.end(result.body);
+          return;
+        }
+        return oaiError(res, result.status >= 500 ? 502 : result.status,
+          `Gateway error: ${result.body.toString().substring(0, 500)}`,
+          "server_error", "gateway_error");
+      }
+      return oaiError(res, 503, "P2P unavailable and no Gateway configured", "server_error", "no_provider");
+    }
   } catch (e) {
     console.error(`[morpheus-proxy] Session open error: ${e.message}`);
+    p2pFailure();
+
+    // Try Gateway fallback
+    if (GATEWAY_API_KEY) {
+      console.log(`[morpheus-proxy] 🔄 Falling back to Gateway after P2P failure`);
+      try {
+        const result = await forwardToGateway(body, isStreaming, res);
+        if (result.streamed) return;
+        if (result.status >= 200 && result.status < 300) {
+          res.writeHead(result.status, { "Content-Type": result.headers["content-type"] || "application/json" });
+          res.end(result.body);
+          return;
+        }
+        return oaiError(res, result.status >= 500 ? 502 : result.status,
+          `Gateway error: ${result.body.toString().substring(0, 500)}`,
+          "server_error", "gateway_error");
+      } catch (ge) {
+        console.error(`[morpheus-proxy] Gateway fallback also failed: ${ge.message}`);
+      }
+    }
+
     // This is a Morpheus infrastructure error, NOT a billing error
     return oaiError(res, 502, `Morpheus session unavailable: ${e.message}`, "server_error", "morpheus_session_error");
   }
 
-  const isStreaming = parsed.stream === true;
   let attempt1Error = null;
 
   try {
@@ -267,6 +546,7 @@ async function handleChatCompletions(req, res, body) {
         console.error(`[morpheus-proxy] Stream error: ${e.message}`);
         res.end();
       });
+      p2pSuccess(); // Mark P2P as working
       return;
     }
 
@@ -277,6 +557,7 @@ async function handleChatCompletions(req, res, body) {
     if (result.status >= 200 && result.status < 300) {
       res.writeHead(result.status, { "Content-Type": result.headers["content-type"] || "application/json" });
       res.end(result.body);
+      p2pSuccess(); // Mark P2P as working
       return;
     }
 
@@ -289,6 +570,7 @@ async function handleChatCompletions(req, res, body) {
     } else {
       // Non-session upstream error — return as server_error (not billing!)
       console.error(`[morpheus-proxy] Router error (${result.status}): ${bodyStr.substring(0, 200)}`);
+      p2pFailure();
       return oaiError(res, result.status >= 500 ? 502 : result.status,
         `Morpheus inference error: ${bodyStr.substring(0, 500)}`,
         "server_error", "morpheus_inference_error");
@@ -296,11 +578,13 @@ async function handleChatCompletions(req, res, body) {
   } catch (e) {
     if (e.message === "upstream_timeout") {
       console.error(`[morpheus-proxy] Upstream timed out on attempt 1`);
+      p2pFailure();
       return oaiError(res, 504, "Morpheus inference timed out", "server_error", "timeout");
     }
     // Connection error — might be transient, try to invalidate session and retry
     console.error(`[morpheus-proxy] Attempt 1 failed: ${e.message}`);
     sessions.delete(modelId);
+    p2pFailure();
     attempt1Error = e.message;
   }
 
@@ -377,13 +661,24 @@ function handleHealth(req, res) {
       active: Date.now() < sess.expiresAt,
     });
   }
-  res.writeHead(200, { "Content-Type": "application/json" });
-  res.end(JSON.stringify({
+
+  // P0: Include balance and fallback status in health
+  const health = {
     status: "ok",
     routerUrl: ROUTER_URL,
     activeSessions,
     availableModels: Object.keys(MODEL_MAP),
-  }));
+    morBalance: morBalance,
+    morBalanceLastCheck: morBalanceLastCheck ? new Date(morBalanceLastCheck).toISOString() : null,
+    morThreshold: MOR_BALANCE_THRESHOLD,
+    fallbackMode,
+    fallbackRemaining: fallbackMode ? Math.max(0, Math.floor((fallbackUntil - Date.now()) / 1000)) : 0,
+    consecutiveFailures,
+    gatewayConfigured: !!GATEWAY_API_KEY,
+  };
+
+  res.writeHead(200, { "Content-Type": "application/json" });
+  res.end(JSON.stringify(health, null, 2));
 }
 
 // --- Auth check ---
@@ -444,16 +739,34 @@ server.listen(PROXY_PORT, PROXY_HOST, async () => {
   console.log(`[morpheus-proxy] Listening on http://${PROXY_HOST}:${PROXY_PORT}`);
   console.log(`[morpheus-proxy] Router: ${ROUTER_URL}`);
   console.log(`[morpheus-proxy] Session duration: ${SESSION_DURATION}s, renew before: ${RENEW_BEFORE_SEC}s`);
+  console.log(`[morpheus-proxy] MOR threshold: ${MOR_BALANCE_THRESHOLD}, fallback threshold: ${FALLBACK_THRESHOLD} failures`);
+  if (GATEWAY_API_KEY) {
+    console.log(`[morpheus-proxy] Gateway fallback: configured (${GATEWAY_BASE_URL})`);
+  } else {
+    console.log(`[morpheus-proxy] Gateway fallback: not configured (set MORPHEUS_GATEWAY_API_KEY)`);
+  }
 
   // Refresh model map from router on startup
   await refreshModelMap();
   console.log(`[morpheus-proxy] Available models: ${Object.keys(MODEL_MAP).join(", ")}`);
+
+  // P0: Check MOR balance on startup
+  const balance = await checkMorBalance();
+  if (balance !== null) {
+    console.log(`[morpheus-proxy] MOR balance: ${balance.toFixed(2)}`);
+    if (balance < MOR_BALANCE_THRESHOLD) {
+      console.warn(`[morpheus-proxy] ⚠️  MOR balance below threshold (${balance.toFixed(2)} < ${MOR_BALANCE_THRESHOLD})`);
+    }
+  }
 
   // Periodically refresh to pick up new on-chain models
   if (MODEL_REFRESH_INTERVAL > 0) {
     setInterval(refreshModelMap, MODEL_REFRESH_INTERVAL * 1000);
     console.log(`[morpheus-proxy] Model refresh interval: ${MODEL_REFRESH_INTERVAL}s`);
   }
+
+  // P0: Periodically check MOR balance (every 5 minutes)
+  setInterval(checkMorBalance, 300000);
 });
 
 server.on("error", (e) => {
