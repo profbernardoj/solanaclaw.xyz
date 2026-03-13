@@ -316,7 +316,7 @@ install_dep() {
       ;;
 
     OpenClaw)
-      curl -fsSL https://get.openclaw.ai | bash
+      npm install -g openclaw@latest
       ;;
 
     *)
@@ -424,9 +424,9 @@ echo ""
 
 if [[ "$SKIP_OPENCLAW" != true ]] && ! command -v openclaw &>/dev/null; then
   echo -e "${BOLD}Installing OpenClaw...${NC}"
-  curl -fsSL https://get.openclaw.ai | bash || {
+  npm install -g openclaw@latest || {
     log_warn "OpenClaw auto-install failed"
-    log "Install manually: curl -fsSL https://get.openclaw.ai | bash"
+    log "Install manually: npm install -g openclaw@latest"
     log "Then re-run this script with --skip-openclaw"
   }
   echo ""
