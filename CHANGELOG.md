@@ -2,6 +2,23 @@
 
 All notable changes to EverClaw are documented here.
 
+## [2026.3.20] - 2026-03-15
+
+### Added
+- **Comprehensive documentation suite** — 22 documents covering all aspects of EverClaw
+  - Getting started: installation, quick-start, configuration
+  - Features: inference, wallet, fallback, ollama, x402-payments, erc8004-registry
+  - Scripts: overview and reference for 43 scripts
+  - Operations: monitoring, three-shifts, troubleshooting
+  - Reference: API, models, contracts, acquiring-mor, economics
+  - Security: security overview, shield policy
+- Total: 5,412 lines, 17,422 words, 596 KB
+
+### Changed
+- Docker image version bumped to 2026.3.20
+
+---
+
 ## [2026.3.19] - 2026-03-15
 
 ### Fixed
