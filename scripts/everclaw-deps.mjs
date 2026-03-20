@@ -69,7 +69,7 @@ Dependencies are declared in SKILL.md frontmatter:
         required: false
         description: "Cyclic task execution"
     github:
-      - repo: profbernardoj/everclaw
+      - repo: EverClaw/EverClaw
         path: skills/pii-guard
         description: "PII leak prevention"
   ---

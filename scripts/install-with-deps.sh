@@ -616,7 +616,7 @@ else
   mkdir -p "$HOME/.openclaw/workspace/skills"
   cd "$HOME/.openclaw/workspace/skills"
 
-  git clone https://github.com/profbernardoj/everclaw.git everclaw || {
+  git clone https://github.com/EverClaw/EverClaw.git everclaw || {
     log_err "Failed to clone EverClaw repository"
     log "Check your internet connection and try again."
     exit 1

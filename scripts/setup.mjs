@@ -27,6 +27,26 @@ import { execSync } from 'child_process';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TEMPLATES_DIR = join(__dirname, '..', 'templates');
 
+// ─── Security Helpers ──────────────────────────────────────────
+
+/**
+ * Sanitize an API key for safe shell interpolation.
+ * Strips anything that isn't alphanumeric, dot, underscore, or hyphen.
+ */
+function sanitizeApiKey(key) {
+  return String(key || '').replace(/[^A-Za-z0-9._-]/g, '');
+}
+
+/**
+ * Create a timestamped backup before overwriting a config file.
+ */
+function backupBeforeWrite(filePath) {
+  if (!existsSync(filePath)) return;
+  const backup = `${filePath}.bak-${Date.now()}`;
+  writeFileSync(backup, readFileSync(filePath, 'utf-8'));
+  console.log(`  💾 Config backed up → ${backup}`);
+}
+
 // ─── Template map ──────────────────────────────────────────────
 
 const TEMPLATES = {
@@ -213,6 +233,7 @@ function updateAuthProfiles(authPath, providerName, apiKey) {
   if (!data.lastGood) data.lastGood = {};
   data.lastGood[providerName] = profileKey;
 
+  backupBeforeWrite(authPath);
   writeFileSync(authPath, JSON.stringify(data, null, 2) + '\n');
   return profileKey;
 }
@@ -220,6 +241,7 @@ function updateAuthProfiles(authPath, providerName, apiKey) {
 // ─── Gateway Test ──────────────────────────────────────────────
 
 function testGateway(apiKey, baseUrl) {
+  const safeKey = sanitizeApiKey(apiKey);
   const url = `${baseUrl || 'https://api.mor.org/api/v1'}/chat/completions`;
   const body = JSON.stringify({
     model: 'glm-5',
@@ -230,7 +252,7 @@ function testGateway(apiKey, baseUrl) {
   try {
     const result = execSync(
       `curl -s -w '\\n%{http_code}' -X POST "${url}" ` +
-      `-H "Authorization: Bearer ${apiKey}" ` +
+      `-H "Authorization: Bearer ${safeKey}" ` +
       `-H "Content-Type: application/json" ` +
       `-d '${body.replace(/'/g, "'\\''")}'`,
       { timeout: 30000, encoding: 'utf-8' }
@@ -403,6 +425,7 @@ if (newFallbacks.length) {
 
 // Apply or dry-run
 if (applyMode) {
+  backupBeforeWrite(configPath);
   writeFileSync(configPath, JSON.stringify(merged, null, 2) + '\n');
   console.log(`\n  ✅ Config written to ${configPath}`);
 

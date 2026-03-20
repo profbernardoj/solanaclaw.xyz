@@ -23,7 +23,7 @@
  * Then run: node bootstrap-gateway.mjs --key YOUR_KEY
  */
 
-import { readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync, chmodSync } from 'fs';
 import { execSync } from 'child_process';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -42,6 +42,31 @@ const CONFIG = {
   timeout: 10000, // 10 seconds
   everclawVersion: 'v2026.3.13', // Will be detected from SKILL.md if possible
 };
+
+// ─── Security Helpers ──────────────────────────────────────────
+
+/**
+ * Mask an API key for display — only show first 4 and last 4 chars.
+ */
+function maskKey(key) {
+  if (!key || key.length < 8) return '[REDACTED]';
+  return key.slice(0, 4) + '...' + key.slice(-4);
+}
+
+/**
+ * Create a timestamped backup before overwriting a config file.
+ */
+function backupBeforeWrite(filePath) {
+  if (!existsSync(filePath)) return;
+  const backup = `${filePath}.bak-${Date.now()}`;
+  writeFileSync(backup, readFileSync(filePath, 'utf-8'));
+  console.log(`  💾 Config backed up → ${backup}`);
+}
+
+// Self-heal: fix permissions on existing key files from older installs
+if (existsSync(CONFIG.keyFile)) {
+  try { chmodSync(CONFIG.keyFile, 0o600); } catch { /* best effort */ }
+}
 
 // GLM-5 model config for Morpheus Gateway
 const GLM5_MODEL = {
@@ -187,8 +212,10 @@ async function requestKey(fingerprint, version) {
 function storeKey(keyData, fingerprint, version) {
   const keyDir = dirname(CONFIG.keyFile);
   if (!existsSync(keyDir)) {
-    mkdirSync(keyDir, { recursive: true });
+    mkdirSync(keyDir, { recursive: true, mode: 0o700 });
   }
+  
+  backupBeforeWrite(CONFIG.keyFile);
   
   const payload = {
     api_key: keyData.apiKey,
@@ -201,6 +228,8 @@ function storeKey(keyData, fingerprint, version) {
   };
   
   writeFileSync(CONFIG.keyFile, JSON.stringify(payload, null, 2) + '\n');
+  chmodSync(CONFIG.keyFile, 0o600);
+  console.log(`  🔐 Key stored securely (0600) at ${CONFIG.keyFile}`);
   return payload;
 }
 
@@ -329,7 +358,8 @@ function configureOpenClawProvider(apiKey, configPath) {
     alias: 'GLM-5 (Bootstrap)',
   };
   
-  // Write back
+  // Write back (with backup)
+  backupBeforeWrite(configPath);
   writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
   
   return { success: true, configPath };
@@ -481,7 +511,7 @@ async function cmdStatus() {
   }
   
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  console.log(`  Key: ${key.api_key}`);
+  console.log(`  Key: ${maskKey(key.api_key)}`);
   console.log(`  Device: ${key.device_fingerprint}`);
   console.log(`  Created: ${new Date(key.created_at).toLocaleDateString()}`);
   console.log(`  Expires: ${new Date(key.expires_at).toLocaleDateString()}${key.expired ? ' (EXPIRED)' : ''}`);
@@ -514,7 +544,7 @@ async function cmdTest() {
     return;
   }
   
-  console.log(`  Testing GLM-5 inference with key ${key.api_key.slice(0, 12)}...`);
+  console.log(`  Testing GLM-5 inference with key ${maskKey(key.api_key)}...`);
   
   const test = await testKey(key.api_key);
   

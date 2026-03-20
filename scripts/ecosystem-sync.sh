@@ -120,7 +120,7 @@ sync_remote() {
 }
 
 # 1. Push to origin first
-echo "📦 Origin (profbernardoj/everclaw)"
+echo "📦 Origin (EverClaw/EverClaw)"
 sync_remote "$ORIGIN_REMOTE" "origin" || true
 echo ""
 

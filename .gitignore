@@ -71,3 +71,9 @@ finance-tracker/
 mission-control/dashboard-data.jsonscripts/finance-tracker.sh
 *.plist
 __pycache__/
+
+# Security: never commit backup files
+*.bak
+*.backup*
+*.bak-*
+morpheus-proxy*.bak

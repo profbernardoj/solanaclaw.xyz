@@ -57,6 +57,11 @@ INFERENCE_FAIL_THRESHOLD=3
 MAX_LOG_LINES=1000
 VERBOSE="${1:-}"
 
+# Restart throttle — prevent rapid-fire restarts
+RESTART_THROTTLE_FILE="$HOME/.openclaw/logs/guardian-last-restart.state"
+RESTART_COOLDOWN_SEC=600  # 10 minutes
+mkdir -p "$(dirname "$RESTART_THROTTLE_FILE")" 2>/dev/null || true
+
 # Circuit breaker config
 MAX_STUCK_DURATION_SEC=1800
 STUCK_CHECK_INTERVAL=300
@@ -64,9 +69,12 @@ STUCK_CHECK_INTERVAL=300
 # Billing config
 BILLING_BACKOFF_INTERVAL=1800  # When billing-dead, only check every 30 min (not 2 min)
 
-# Notification settings
-OWNER_SIGNAL="+1XXXXXXXXXX"
-SIGNAL_ACCOUNT="+1XXXXXXXXXX"
+# Notification settings (env-var driven — set these to enable Signal alerts)
+OWNER_SIGNAL="${GUARDIAN_OWNER_SIGNAL:-}"
+SIGNAL_ACCOUNT="${GUARDIAN_SIGNAL_ACCOUNT:-}"
+if [[ -z "$OWNER_SIGNAL" ]]; then
+  [[ "$VERBOSE" == "--verbose" ]] && log "Signal notifications DISABLED (set GUARDIAN_OWNER_SIGNAL env var)"
+fi
 
 # Nuclear reinstall is disabled by default (security risk: unverified remote code execution).
 # Set GUARDIAN_ALLOW_NUCLEAR=1 to re-enable at your own risk.
@@ -336,6 +344,18 @@ do_nuclear_reinstall() {
 }
 
 restart_all_steps() {
+  # Restart throttle — skip if last restart was less than 10 minutes ago
+  local now last_restart
+  now=$(date +%s)
+  last_restart=0
+  [[ -f "$RESTART_THROTTLE_FILE" ]] && last_restart=$(cat "$RESTART_THROTTLE_FILE" 2>/dev/null || echo 0)
+  if (( now - last_restart < RESTART_COOLDOWN_SEC )); then
+    local elapsed=$(( (now - last_restart) / 60 ))
+    log "RESTART THROTTLED: Last restart was ${elapsed}m ago (cooldown: $((RESTART_COOLDOWN_SEC / 60))m). Skipping."
+    return 1
+  fi
+  echo "$now" > "$RESTART_THROTTLE_FILE"
+
   do_graceful_restart && return 0
   do_hard_restart && return 0
   do_kickstart && return 0
