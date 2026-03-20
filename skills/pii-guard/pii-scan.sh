@@ -87,6 +87,14 @@ build_builtin_patterns() {
     'EAACEdEose0cBA[A-Za-z0-9]+'                  # Facebook access token
   )
 
+  # Stronger secrets (Phase 4 audit additions)
+  patterns+=(
+    'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}'  # JWT tokens (3 segments)
+    '-----BEGIN (RSA|OPENSSH|EC|DSA) PRIVATE KEY-----'                  # SSH/private keys
+    '[A-Za-z0-9+/]{64,}'                          # 64+ char base64 (generic keys)
+    '[0-9]{13,19}'                                 # Credit card numbers (Luhn check deferred)
+  )
+
   # Home directory paths
   patterns+=(
     '/Users/[A-Za-z][A-Za-z0-9_-]+/'             # macOS home dirs
@@ -407,11 +415,22 @@ case "${1:-}" in
     ;;
   --text)
     shift
-    scan_content "text input" "$*" || found_any=1
+    _text_input="$*"
+    scan_content "text input" "$_text_input" || found_any=1
+    # Smart URL exfil protection — flag if URL + PII both present
+    if [[ "$_text_input" == *"://"* ]] && echo "$_text_input" | grep -qE "$FULL_PATTERN" 2>/dev/null; then
+      echo -e "${RED}❌ Potential exfiltration: URL detected near PII — blocked by pii-guard${NC}"
+      found_any=1
+    fi
     ;;
   -)
     content=$(cat)
     scan_content "stdin" "$content" || found_any=1
+    # Smart URL exfil protection for stdin mode
+    if [[ "$content" == *"://"* ]] && echo "$content" | grep -qE "$FULL_PATTERN" 2>/dev/null; then
+      echo -e "${RED}❌ Potential exfiltration: URL detected near PII — blocked by pii-guard${NC}"
+      found_any=1
+    fi
     ;;
   --history)
     shift

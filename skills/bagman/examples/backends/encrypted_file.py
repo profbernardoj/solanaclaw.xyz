@@ -154,8 +154,22 @@ class EncryptedFileBackend(SecretBackend):
             return entry.get("value", entry.get("password", ""))
         return entry
     
+    @staticmethod
+    def _check_entropy(value: str, min_bits: float = 3.8) -> bool:
+        """Check Shannon entropy of a secret value."""
+        if not value or len(value) < 8:
+            return False
+        from collections import Counter
+        import math
+        counts = Counter(value)
+        length = len(value)
+        entropy = -sum((c / length) * math.log2(c / length) for c in counts.values())
+        return entropy >= min_bits
+
     def set(self, key: str, value: str, metadata: Optional[dict] = None) -> None:
         """Store secret in encrypted file."""
+        if not self._check_entropy(value):
+            print(f"⚠️  bagman: Low-entropy value for '{key}' — consider using a stronger secret")
         self._load()
         
         entry = {"value": value}
