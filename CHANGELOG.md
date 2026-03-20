@@ -13,6 +13,8 @@ All notable changes to EverClaw are documented here.
   - Robust Intel Mac support (`/usr/local/bin/brew`) alongside Apple Silicon (`/opt/homebrew/bin/brew`)
   - Localized admin group detection (`admin|administradores|administrator`)
   - nvm fallback with `--lts` for future-proof Node.js installs
+  - Soft git warning on non-admin Macs (hints at `xcode-select --install` instead of hard fail)
+  - Grok 4.2 final audit: 93/100 — 3 fixes applied (brew version display, soft git warning, header verification)
 
 ### Added
 - **API key injection via environment variables** — Container entrypoint now accepts `MORPHEUS_GATEWAY_API_KEY` and `MORPHEUS_PROXY_API_KEY` env vars and injects them into the OpenClaw config at startup. `mor-gateway` is a custom provider not in OpenClaw's auto-detection list, so env vars weren't picked up. Users get a clear warning with signup URL if no AI provider keys are configured.
