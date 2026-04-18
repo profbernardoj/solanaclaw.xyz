@@ -8,7 +8,6 @@ package-lock.json
 
 # Git
 .git
-.github
 
 # Large directories - EXCLUDE FROM ALL REPOS
 claw-repos/

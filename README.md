@@ -1,4 +1,8 @@
-# ♾️ Everclaw — AI Inference You Own, Forever Powering Your OpenClaw Agents
+> **📢 Canonical repo: [profbernardoj/morpheus-skill](https://github.com/profbernardoj/morpheus-skill)** — EverClaw has been rebranded to **Morpheus Skill**. All development, issues, and PRs should target the canonical repo. This mirror is kept in sync automatically.
+
+# ♾️ Morpheus Skill — AI Inference You Own, Forever Powering Your Agents
+
+*Formerly EverClaw. Powered by the [Morpheus](https://mor.org) decentralized inference network.*
 
 **Open-source first.** Everclaw connects your [OpenClaw](https://github.com/openclaw/openclaw) agent to the [[REDACTED]](https://mor.org) decentralized inference network — putting open-source models like GLM-5 (Opus 4.5-level) front and center as your default, with Claude as a fallback only when needed.
 

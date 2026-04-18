@@ -1,4 +1,4 @@
-name: EverClaw CI/CD Pipeline
+name: Morpheus Skill CI/CD Pipeline
 
 on:
   push:
