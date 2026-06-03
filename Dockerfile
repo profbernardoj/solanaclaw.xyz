@@ -102,8 +102,10 @@ COPY packages/core/auth-proxy/login-app.jsx ./
 COPY packages/core/auth-proxy/build-login.mjs ./
 
 # Install ALL dependencies (including devDependencies for build step)
-# Use npm ci if lockfile exists, fall back to npm install for first build
-RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
+# --ignore-scripts skips native addon compilation (utf-8-validate, bufferutil)
+# which would fail in slim images without python3/gcc. These are optional
+# WebSocket performance addons — pure JS fallbacks work fine.
+RUN if [ -f package-lock.json ]; then npm ci --ignore-scripts; else npm install --ignore-scripts; fi
 
 # Bundle Privy SDK + React into a single JS file (eliminates CDN dependency)
 RUN npm run build
