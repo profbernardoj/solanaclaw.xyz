@@ -202,14 +202,25 @@ async function initializeVerificationKey() {
       // PEM-encoded SPKI public key
       verificationKey = await importSPKI(keyMaterial, 'ES256');
     } else {
-      // Assume base64-encoded PEM — decode and import as SPKI
-      const pem = Buffer.from(keyMaterial, 'base64').toString('utf8');
-      if (pem.includes('-----BEGIN PUBLIC KEY-----')) {
-        verificationKey = await importSPKI(pem, 'ES256');
-      } else {
-        throw new Error(
-          'Unrecognized key format. Expected PEM (-----BEGIN PUBLIC KEY-----) or JWK ({...})'
-        );
+      // Raw base64 key body (no PEM headers) — wrap in PEM armor and import
+      // This handles the case where PRIVY_VERIFICATION_KEY is stored as just the
+      // base64 key material (e.g. "MFkwEwYHKoZIzj0C...") without PEM headers.
+      // First try wrapping directly, then try base64-decoding in case it's a
+      // base64-encoded PEM string.
+      const wrappedPem = `-----BEGIN PUBLIC KEY-----\n${keyMaterial}\n-----END PUBLIC KEY-----`;
+      try {
+        verificationKey = await importSPKI(wrappedPem, 'ES256');
+      } catch {
+        // Fall back: maybe it's base64-encoded PEM
+        const decoded = Buffer.from(keyMaterial, 'base64').toString('utf8');
+        if (decoded.includes('-----BEGIN PUBLIC KEY-----')) {
+          verificationKey = await importSPKI(decoded, 'ES256');
+        } else {
+          throw new Error(
+            'Unrecognized key format. Expected PEM (-----BEGIN PUBLIC KEY-----), ' +
+            'JWK ({...}), or raw base64 key body'
+          );
+        }
       }
     }
 
