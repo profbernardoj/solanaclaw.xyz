@@ -91,7 +91,13 @@ RUN pnpm ui:build
 # Install runtime deps for all bundled OpenClaw channel plugins.
 # postinstall-bundled-plugins.mjs skips source checkouts (detects src/ + extensions/),
 # so we remove these build-only artifacts first (also shrinks final image ~100 MB).
-RUN rm -rf ./src ./extensions && \
+# Preserve runtime templates before removing build-only source artifacts.
+# src/agents/templates/ contains HEARTBEAT.md and other workspace boot templates
+# that OpenClaw reads at runtime (not compiled into dist/).
+RUN cp -r ./src/agents/templates /tmp/openclaw-templates 2>/dev/null || true && \
+    rm -rf ./src ./extensions && \
+    mkdir -p ./src/agents && cp -r /tmp/openclaw-templates ./src/agents/templates 2>/dev/null || true && \
+    rm -rf /tmp/openclaw-templates && \
     NODE_ENV=production node ./scripts/postinstall-bundled-plugins.mjs && \
     npm cache clean --force
 
