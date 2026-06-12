@@ -93,6 +93,7 @@ const CIG_TOKEN_TTL_MS = 10 * 60 * 1000;    // 10 minutes
 const CIG_TOKEN_REFRESH_MS = 60_000;         // Refresh 60s before expiry
 const CIG_FETCH_TIMEOUT_MS = 10_000;         // 10s timeout for CIG HTTP calls
 const CIG_MAX_BODY_BYTES = 1024 * 1024;      // 1 MB max inference request body
+const CIG_INFERENCE_TIMEOUT_MS = 5 * 60 * 1000; // 5 min timeout for inference (streaming)
 let cigTokenCache = { token: '', expiresAt: 0 };
 
 // ─── Rate Limiter (in-memory, per-IP) ────────────────────────────────────────
@@ -521,49 +522,57 @@ async function handleCigProxy(req, res, url) {
     const cigToken = await mintCigToken();
 
     // Forward to CIG inference endpoint, preserving pathname + query string
+    // Note: CIG_CONFIG.inferenceUrl path (e.g. /functions/v1/cig-inference) is the
+    // base; url.pathname (/v1/chat/completions) appends the OpenAI-compatible route.
     const targetUrl = CIG_CONFIG.inferenceUrl + url.pathname + url.search;
 
     const controller = new AbortController();
-    // Inference can take a while (streaming); use 5-minute timeout
-    const timeoutId = setTimeout(() => controller.abort(), 5 * 60 * 1000);
-    const proxyResp = await fetch(targetUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': req.headers['content-type'] || 'application/json',
-        'Authorization': `Bearer ${cigToken}`,
-        'X-Container-Fqdn': CIG_CONFIG.containerFqdn,
-      },
-      body: bodyBuf,
-      signal: controller.signal,
-    });
+    let timeoutId;
+    try {
+      timeoutId = setTimeout(() => controller.abort(), CIG_INFERENCE_TIMEOUT_MS);
+      const proxyResp = await fetch(targetUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': req.headers['content-type'] || 'application/json',
+          'Authorization': `Bearer ${cigToken}`,
+          'X-Container-Fqdn': CIG_CONFIG.containerFqdn,
+        },
+        body: bodyBuf,
+        signal: controller.signal,
+      });
 
-    // Stream the response back
-    res.writeHead(proxyResp.status, {
-      'Content-Type': proxyResp.headers.get('content-type') || 'application/json',
-      'Cache-Control': 'no-store',
-    });
+      // Stream the response back
+      res.writeHead(proxyResp.status, {
+        'Content-Type': proxyResp.headers.get('content-type') || 'application/json',
+        'Cache-Control': 'no-store',
+      });
 
-    if (proxyResp.body) {
-      const reader = proxyResp.body.getReader();
-      const pump = async () => {
+      if (proxyResp.body) {
+        const reader = proxyResp.body.getReader();
         while (true) {
           const { done, value } = await reader.read();
           if (done) { res.end(); break; }
           res.write(value);
         }
-      };
-      await pump();
-    } else {
-      const text = await proxyResp.text();
-      res.end(text);
+      } else {
+        const text = await proxyResp.text();
+        res.end(text);
+      }
+    } catch (err) {
+      console.error('[cig-proxy] Error:', err.message);
+      const status = err.name === 'AbortError' ? 504 : 502;
+      if (!res.headersSent) {
+        res.writeHead(status, { 'Content-Type': 'application/json' });
+      }
+      res.end(JSON.stringify({ error: { message: 'inference_proxy_error', type: 'proxy_error' } }));
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId);
     }
-    clearTimeout(timeoutId);
   } catch (err) {
-    clearTimeout(timeoutId);
+    // Catch errors from body reading, token minting, etc.
     console.error('[cig-proxy] Error:', err.message);
-    const status = err.name === 'AbortError' ? 504 : 502;
     if (!res.headersSent) {
-      res.writeHead(status, { 'Content-Type': 'application/json' });
+      res.writeHead(502, { 'Content-Type': 'application/json' });
     }
     res.end(JSON.stringify({ error: { message: 'inference_proxy_error', type: 'proxy_error' } }));
   }
